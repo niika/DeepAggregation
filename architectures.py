@@ -130,12 +130,15 @@ class DeepSetNet(nn.Module):
         
         return out
 
-class AttentionAggregation(nn.Module):
-    """ This Block uses Multi-head attention to aggregate a series 2D feautures"""
+class AttentionAggregation2(nn.Module):
+    """ This Block uses Multi-head attention to aggregate a series of 2D feautures"""
     
-    def __init__(self, embed_dim = 64, num_heads=8):
-        super(AttentionAggregation, self).__init__()
-        self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=1):
+        super(AttentionAggregation2, self).__init__()
+        #self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=dim_feedforward)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
 
     def forward(self, xs):
         """Forward pass of our Aggregation Block 
@@ -147,20 +150,52 @@ class AttentionAggregation(nn.Module):
             H: Height
             W: Width
         """
-        B, C, H, W = xs[0].size()
-        S = len(xs)
+        B, S, C, H, W = xs.size()
         # Transform list of tensors S x (B, C, H, W) -> B x (S, H x W, C)
-        x =  torch.stack(xs)                          # -> (S, B, C, H, W)
-        xs = torch.split(x,1,1)                       # ->  B x (S, 1, H, W, C)
-        xs = [x.squeeze(1).view(S,-1,C) for x in xs]  # ->  B x (S, H x W, C)
+        y =  xs.permute(1,0,2,3,4)                       # -> (S, B, C, H, W)
+        y = torch.split(y,1,1)                       # ->  B x (S, 1, H, W, C)
+        y = [x.squeeze(1).view(S,-1,C) for x in y]  # ->  B x (S, H x W, C)
         
-        # Compute attetion over the sequence of images
-        xs = [self.attention(x,x,x)[0] for x in xs]   # -> B x (S, H x W, C)
-        xs =  [x.view(S,H,W,C) for x in xs]           # -> B x (S, H, W, C)
-        xs =  [x.view(S,C,H,W) for x in xs]           # -> B x (S, C, H, W, )
-        xs = torch.stack(xs, 1)                       # -> (S, B, C, H, W)
+        # For each element in the Batch: Compute attetion over the sequence of images
+        y = [self.transformer_encoder(x) for x in y]   # -> B x (S, H x W, C)
+        y =  [x.view(S,H,W,C) for x in y]           # -> B x (S, H, W, C)
+        y =  [x.view(S,C,H,W) for x in y]           # -> B x (S, C, H, W, )
+        y = torch.stack(xs, 1)                       # -> (S, B, C, H, W)
         
         
         #xs = torch.split(xs, 1, 0)                    # -> S x (B, 1, C, H, W)
         #xs = [x.squeeze(0) for x in xs]               # -> S x (B, C, H, W)
         return xs
+    
+class AttentionAggregation(nn.Module):
+    """ This Block uses Multi-head attention to aggregate a series of 2D feautures"""
+    
+    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=1):
+        super(AttentionAggregation, self).__init__()
+        #self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=dim_feedforward)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.softmax = nn.Softmax(1)
+
+
+    def forward(self, xs):
+        """Forward pass of our Aggregation Block 
+        
+        xs: list of tensors of size S x (B, C, H, W)
+            S: Sequence Length
+            B: batch size
+            C: Channels (= embed_dim)
+            H: Height
+            W: Width
+        """
+        B, S, C, H, W = xs.size()
+        #y = xs.permute(1,0,2,3,4)             # -> (S, B, C, H, W)
+        y = xs.view(S,-1,C)                    # -> (S, B x H x W, C)
+        
+        y = self.transformer_encoder(y)       # -> (S, B x H x W, C)
+        y = y.view(S, B, C, H, W)             # -> (S, B, C, H, W)
+        y = y.permute(1,0,2,3,4)              # -> (B, S, C, H, W)
+        y = self.softmax(y)                   # -> (B, S, C, H, W) normalized along (S)equence dimension
+        y = (y*xs).sum(1)
+        
+        return y
