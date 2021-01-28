@@ -13,6 +13,9 @@ from scipy.stats import multivariate_normal
 from scipy import random, linalg
 from sklearn.model_selection import train_test_split
 import torch.optim as optim
+import pytorch_lightning as pl
+
+
 import re
 import json
 import time
@@ -47,13 +50,49 @@ class MeanAgg(nn.Module):
 
     def forward(self, x):
         """ Forward-pass of mean-aggregation
-        x: list of tensor of size S x (B, C, H, W)
+        x: list of tensor of size (B, S, C, H, W)
 
         """
-        x = torch.stack(x).mean(0)
-        return x    
+        return x.mean(1)    
         
-class DeepSetNet(nn.Module):
+
+
+    
+class AttentionAggregation(nn.Module):
+    """ This Block uses Multi-head attention to aggregate a series of 2D feautures"""
+    
+    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=1):
+        super(AttentionAggregation, self).__init__()
+        #self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=dim_feedforward)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.softmax = nn.Softmax(1)
+
+
+    def forward(self, xs):
+        """Forward pass of our Aggregation Block 
+        
+        xs: list of tensors of size (B, S, C, H, W)
+            S: Sequence Length
+            B: batch size
+            C: Channels (= embed_dim)
+            H: Height
+            W: Width 
+        """
+        B, S, C, H, W = xs.size()             # -> (B, S, C, H, W)
+        y = xs.permute(1,0,3,4,2)             # -> (S, B, H, W, C)
+        y = xs.view(S,-1,C)                   # -> (S, B x H x W, C)
+        
+        y = self.transformer_encoder(y)       # -> (S, B x H x W, C)
+        y = y.view(S, B, H, W, C)             # -> (S, B, H, W, C)
+        y = y.permute(1,0,4,2,3)              # -> (B, S, C, H, W)
+        y = self.softmax(y)                   # -> (B, S, C, H, W) normalized along (S)equence dimension
+        y = (y*xs).sum(1)
+        
+        return y
+
+    
+class DeepAggNet(pl.LightningModule):
     """ Deep Set Residual Neural Network """
     def __init__(self, encoder_num_blocks=10, decoder_num_blocks=10, smooth_num_blocks=6, planes=32, agg_block=MeanAgg):
         """
@@ -63,9 +102,9 @@ class DeepSetNet(nn.Module):
         planes:             Number of feature planes used in the initial embedding,
                             the number of planes double after each downsampling
         agg_block:          A block that aggregates a series of embeddings into a singular embedding: 
-                            S x (B, C, H, W) -> (B, C, H, W)
+                            (B, S, C, H, W) -> (B, C, H, W)
         """
-        super(DeepSetNet, self).__init__()
+        super(DeepAggNet, self).__init__()
         self.planes = planes
         self.input = nn.Conv2d(3, self.planes, kernel_size=3, stride=1, padding=1, bias=True)
         self.output= nn.Conv2d(self.planes, 3, kernel_size=3, stride=1, padding=1, bias=True)
@@ -91,7 +130,7 @@ class DeepSetNet(nn.Module):
         # Embedding of downsampled features
         self.encoder = self._make_layer(n, encoder_num_blocks)
         
-        self.agg = agg_block()
+        self.agg = agg_block(embed_dim=n)
         self.decoder = self._make_layer(n, decoder_num_blocks)
         self.smooth  = self._make_smooth_layer(planes, smooth_num_blocks)
         
@@ -124,78 +163,32 @@ class DeepSetNet(nn.Module):
         xs = torch.split(x,1,dim = 1)
         xs = [torch.squeeze(x,dim=1) for x in xs]
         embedding = [self.encoder(self.downsample(self.input(x))) for x in xs]
+        embedding = torch.stack(embedding,1)
         embedding = self.agg(embedding)
         out = self.output(self.smooth(self.upsample(self.decoder(embedding))))
-
         
         return out
-
-class AttentionAggregation2(nn.Module):
-    """ This Block uses Multi-head attention to aggregate a series of 2D feautures"""
     
-    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=1):
-        super(AttentionAggregation2, self).__init__()
-        #self.attention = nn.MultiheadAttention(embed_dim, num_heads)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=dim_feedforward)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+    def training_step(self, batch, batch_idx):
+        """Forward pass of our DeepSet Network 
         
-
-    def forward(self, xs):
-        """Forward pass of our Aggregation Block 
-        
-        xs: list of tensors of size S x (B, C, H, W)
-            S: Sequence Length
-            B: batch size
-            C: Channels (= embed_dim)
-            H: Height
-            W: Width
+        batch : tuple of tensors of size (B, S, C, H, W)
         """
-        B, S, C, H, W = xs.size()
-        # Transform list of tensors S x (B, C, H, W) -> B x (S, H x W, C)
-        y =  xs.permute(1,0,2,3,4)                       # -> (S, B, C, H, W)
-        y = torch.split(y,1,1)                       # ->  B x (S, 1, H, W, C)
-        y = [x.squeeze(1).view(S,-1,C) for x in y]  # ->  B x (S, H x W, C)
-        
-        # For each element in the Batch: Compute attetion over the sequence of images
-        y = [self.transformer_encoder(x) for x in y]   # -> B x (S, H x W, C)
-        y =  [x.view(S,H,W,C) for x in y]           # -> B x (S, H, W, C)
-        y =  [x.view(S,C,H,W) for x in y]           # -> B x (S, C, H, W, )
-        y = torch.stack(xs, 1)                       # -> (S, B, C, H, W)
-        
-        
-        #xs = torch.split(xs, 1, 0)                    # -> S x (B, 1, C, H, W)
-        #xs = [x.squeeze(0) for x in xs]               # -> S x (B, C, H, W)
-        return xs
-    
-class AttentionAggregation(nn.Module):
-    """ This Block uses Multi-head attention to aggregate a series of 2D feautures"""
-    
-    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=1):
-        super(AttentionAggregation, self).__init__()
-        #self.attention = nn.MultiheadAttention(embed_dim, num_heads)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=dim_feedforward)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.softmax = nn.Softmax(1)
+        # training_step defined the train loop. It is independent of forward
+        x, y = batch
 
-
-    def forward(self, xs):
-        """Forward pass of our Aggregation Block 
+        # Forward pass
+        xs = torch.split(x,1,dim = 1)
+        xs = [torch.squeeze(x,dim=1) for x in xs]
+        embedding = [self.encoder(self.downsample(self.input(x))) for x in xs]
+        embedding = torch.stack(embedding,1)
+        embedding = self.agg(embedding)
+        out = self.output(self.smooth(self.upsample(self.decoder(embedding))))
         
-        xs: list of tensors of size S x (B, C, H, W)
-            S: Sequence Length
-            B: batch size
-            C: Channels (= embed_dim)
-            H: Height
-            W: Width
-        """
-        B, S, C, H, W = xs.size()
-        #y = xs.permute(1,0,2,3,4)             # -> (S, B, C, H, W)
-        y = xs.view(S,-1,C)                    # -> (S, B x H x W, C)
-        
-        y = self.transformer_encoder(y)       # -> (S, B x H x W, C)
-        y = y.view(S, B, C, H, W)             # -> (S, B, C, H, W)
-        y = y.permute(1,0,2,3,4)              # -> (B, S, C, H, W)
-        y = self.softmax(y)                   # -> (B, S, C, H, W) normalized along (S)equence dimension
-        y = (y*xs).sum(1)
-        
-        return y
+        loss = F.mse_loss(y, out)
+        self.log('train_loss', loss)
+        return loss
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        return optimizer
