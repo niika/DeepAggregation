@@ -61,12 +61,13 @@ class MeanAgg(nn.Module):
 class AttentionAggregation(nn.Module):
     """ This Block uses Multi-head attention to aggregate a series of 2D feautures"""
     
-    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=1):
+    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=3):
         super(AttentionAggregation, self).__init__()
         #self.attention = nn.MultiheadAttention(embed_dim, num_heads)
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=dim_feedforward)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.softmax = nn.Softmax(1)
+        
 
 
     def forward(self, xs):
@@ -87,14 +88,14 @@ class AttentionAggregation(nn.Module):
         y = y.view(S, B, H, W, C)             # -> (S, B, H, W, C)
         y = y.permute(1,0,4,2,3)              # -> (B, S, C, H, W)
         y = self.softmax(y)                   # -> (B, S, C, H, W) normalized along (S)equence dimension
-        y = (y*xs).sum(1)
+        y = (y*xs).sum(1)                     # -> (B, C, H, W)
         
         return y
 
     
 class DeepAggNet(pl.LightningModule):
     """ Deep Set Residual Neural Network """
-    def __init__(self, encoder_num_blocks=10, decoder_num_blocks=10, smooth_num_blocks=6, planes=32, agg_block=MeanAgg):
+    def __init__(self, encoder_num_blocks=10, decoder_num_blocks=10, smooth_num_blocks=6, planes=32, agg_block="Mean", agg_params=None):
         """
         encoder_num_blocks: Number of residual blocks used for encoding the images into an embedding
         decoder_num_blocks: Number of residual blocks used for decoding the embeddings into an image
@@ -105,6 +106,9 @@ class DeepAggNet(pl.LightningModule):
                             (B, S, C, H, W) -> (B, C, H, W)
         """
         super(DeepAggNet, self).__init__()
+                
+        
+        
         self.planes = planes
         self.input = nn.Conv2d(3, self.planes, kernel_size=3, stride=1, padding=1, bias=True)
         self.output= nn.Conv2d(self.planes, 3, kernel_size=3, stride=1, padding=1, bias=True)
@@ -115,14 +119,17 @@ class DeepAggNet(pl.LightningModule):
         self.upsample = []
         n = planes
         for i in range(2):
+            # create downsampling layers using convolutions with strides
             self.downsample.append( nn.Conv2d(in_channels = n, out_channels=n*2, kernel_size=3, stride=2, padding=1 ) )
             self.downsample.append(nn.ReLU(inplace=True))
 
-            
+            # create upsampling layers using transposed convolutions (should be symmetric to downsampling)
             self.upsample = [nn.ReLU(inplace=True)] + self.upsample
             self.upsample = [nn.ConvTranspose2d(in_channels=n*2, out_channels=n, kernel_size=3, stride=2, padding=1, output_padding=1)] + self.upsample
             n *= 2
-
+            
+            
+        
         self.downsample = nn.Sequential(*self.downsample)
         self.upsample = nn.Sequential(*self.upsample)
         
@@ -130,9 +137,29 @@ class DeepAggNet(pl.LightningModule):
         # Embedding of downsampled features
         self.encoder = self._make_layer(n, encoder_num_blocks)
         
-        self.agg = agg_block(embed_dim=n)
+        # Define Aggregation-Block
+        if agg_block == "Attention":
+            self.agg = AttentionAggregation(embed_dim=n, **agg_params)
+        else:
+            self.agg = MeanAgg()
+        
+        # create decoder layers that are applied on the aggregated features
         self.decoder = self._make_layer(n, decoder_num_blocks)
+        # create smoothing layers that are applied on the upsampled features
         self.smooth  = self._make_smooth_layer(planes, smooth_num_blocks)
+        
+        #### LOGGING #####
+        self.hyperparams = {
+            "encoder_num_blocks":encoder_num_blocks, 
+            "decoder_num_blocks":decoder_num_blocks, 
+            "smooth_num_blocks":smooth_num_blocks, 
+            "planes":planes, 
+            "embed_dim":n,
+            "agg_block":"Mean",
+        }
+        self.hyperparams.update(agg_params)
+        self.save_hyperparameters(self.hyperparams)
+
         
     def _make_layer(self, planes, num_blocks):
         layers = []
