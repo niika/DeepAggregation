@@ -187,7 +187,9 @@ class DeepAggNet(pl.LightningModule):
         
         loss = F.mse_loss(y, out)
         self.log('train_loss', loss)
-        return loss
+        #self.logger.experiment.log_metric({'train_loss':loss.item()})
+        logs = {'train_loss':loss}
+        return {'loss': loss, 'logs': logs}
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
