@@ -6,6 +6,7 @@ import os
 from torchvision import transforms
 import torchvision
 import numpy as np
+from random import sample 
 
 class ImageData(Dataset):
     def __init__(self, root, seq_length = 5, transform = None, distortion = None, size=(128,128)):
@@ -36,3 +37,29 @@ class ImageData(Dataset):
     
     def show(self, idx):
         return self.images[idx]
+    
+    
+class SpecShadOcc(Dataset):
+    def __init__(self, root, seq_length = 5, size=(256,256)):
+        self.root = root    
+        self.seq_length = seq_length
+        
+        batches = os.listdir(root)
+        all_imgs_paths = [[root+"b{}/img{}.png".format(i,j)  for j in range(12) if os.path.isfile(root+"b{}/img{}.png".format(i,j))] for i in range(1,102) ]
+        
+        transform = transforms.Compose([transforms.Resize(size),lambda x: np.array(x),transforms.ToTensor()])
+        self.images = list(map(lambda x: list(map( lambda elem: transform(Image.open(elem).convert("RGB")), x)), all_imgs_paths))
+        
+    def __getitem__(self, index):
+        batch = self.images[index]
+        y = batch[0]
+        xs = sample(batch[1:],self.seq_length)
+        xs = torch.stack(xs)
+        return xs, y
+    
+    def __len__(self):
+        return len(self.images)
+    
+    def show(self, idx):
+        toPIL = transforms.ToPILImage()
+        return [toPIL(x) for x in self.images[idx]]

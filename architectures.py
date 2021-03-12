@@ -14,11 +14,16 @@ from scipy import random, linalg
 from sklearn.model_selection import train_test_split
 import torch.optim as optim
 import pytorch_lightning as pl
+import torchvision
 
 
 import re
 import json
 import time
+
+
+toPIL = transforms.ToPILImage()
+batches2Grids = lambda xs: [toPil(torchvision.utils.make_grid(x.squeeze(0), nrow=10, padding=10)) for x in torch.split(xs,1)]
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_planes, out_planes):
@@ -155,7 +160,7 @@ class DeepAggNet(pl.LightningModule):
             "smooth_num_blocks":smooth_num_blocks, 
             "planes":planes, 
             "embed_dim":n,
-            "agg_block":"Mean",
+            "agg_block":agg_block,
         }
         self.hyperparams.update(agg_params)
         self.save_hyperparameters(self.hyperparams)
@@ -213,10 +218,48 @@ class DeepAggNet(pl.LightningModule):
         out = self.output(self.smooth(self.upsample(self.decoder(embedding))))
         
         loss = F.mse_loss(y, out)
-        self.log('train_loss', loss)
+        #self.log('train_loss', loss)
         #self.logger.experiment.log_metric({'train_loss':loss.item()})
-        logs = {'train_loss':loss}
-        return {'loss': loss, 'logs': logs}
+        
+        #seqs = batches2Grids(x)
+        #self.logger.experiment.log_image(seqs[0])
+        #logs = {'train_loss':loss}
+        return {'loss': loss}
+    
+    def test_step(self, batch, batch_idx):
+        """Forward pass of our DeepSet Network 
+        
+        batch : tuple of tensors of size (B, S, C, H, W)
+        """
+        loss = self.training_step(batch, batch_idx)
+        return {'test_loss': loss['loss']}
+    
+    def validation_step(self, batch, batch_idx):
+        """Forward pass of our DeepSet Network 
+        
+        batch : tuple of tensors of size (B, S, C, H, W)
+        """
+        # training_step defined the train loop. It is independent of forward
+        x, y = batch
+
+        # Forward pass
+        xs = torch.split(x,1,dim = 1)
+        xs = [torch.squeeze(x,dim=1) for x in xs]
+        embedding = [self.encoder(self.downsample(self.input(x))) for x in xs]
+        embedding = torch.stack(embedding,1)
+        embedding = self.agg(embedding)
+        out = self.output(self.smooth(self.upsample(self.decoder(embedding))))
+        
+        loss = F.mse_loss(y, out)
+        
+        return {'val_loss': loss, "input": x, "gt":y, "output": out}
+    
+    def validation_epoch_end(self, outputs):
+        x = outputs[0]
+        grid = torchvision.utils.make_grid(x["output"]) 
+        avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
+        self.logger.experiment.log_image(toPIL(grid), step =self.global_step) 
+        return {'avg_loss': avg_loss}
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
