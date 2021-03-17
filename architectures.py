@@ -100,7 +100,7 @@ class AttentionAggregation(nn.Module):
     
 class DeepAggNet(pl.LightningModule):
     """ Deep Set Residual Neural Network """
-    def __init__(self, encoder_num_blocks=10, decoder_num_blocks=10, smooth_num_blocks=6, planes=32, agg_block="Mean", agg_params=None):
+    def __init__(self, encoder_num_blocks=10, decoder_num_blocks=10, smooth_num_blocks=6, planes=32, agg_block="Mean", num_heads=4, dim_feedforward=64, num_layers=3):
         """
         encoder_num_blocks: Number of residual blocks used for encoding the images into an embedding
         decoder_num_blocks: Number of residual blocks used for decoding the embeddings into an image
@@ -142,9 +142,10 @@ class DeepAggNet(pl.LightningModule):
         # Embedding of downsampled features
         self.encoder = self._make_layer(n, encoder_num_blocks)
         
+        
         # Define Aggregation-Block
         if agg_block == "Attention":
-            self.agg = AttentionAggregation(embed_dim=n, **agg_params)
+            self.agg = AttentionAggregation(embed_dim=n, num_heads=num_heads, dim_feedforward=dim_feedforward, num_layers=num_layers )
         else:
             self.agg = MeanAgg()
         
@@ -160,9 +161,10 @@ class DeepAggNet(pl.LightningModule):
             "smooth_num_blocks":smooth_num_blocks, 
             "planes":planes, 
             "embed_dim":n,
-            "agg_block":agg_block,
+            "num_heads":num_heads, 
+            "dim_feedforward":dim_feedforward, 
+            "num_layers":num_layers 
         }
-        self.hyperparams.update(agg_params)
         self.save_hyperparameters(self.hyperparams)
 
         
@@ -216,14 +218,14 @@ class DeepAggNet(pl.LightningModule):
         embedding = torch.stack(embedding,1)
         embedding = self.agg(embedding)
         out = self.output(self.smooth(self.upsample(self.decoder(embedding))))
-        
         loss = F.mse_loss(y, out)
-        #self.log('train_loss', loss)
+
         #self.logger.experiment.log_metric({'train_loss':loss.item()})
-        
+
         #seqs = batches2Grids(x)
         #self.logger.experiment.log_image(seqs[0])
         #logs = {'train_loss':loss}
+        self.log('train_loss', loss)
         return {'loss': loss}
     
     def test_step(self, batch, batch_idx):
@@ -251,16 +253,22 @@ class DeepAggNet(pl.LightningModule):
         out = self.output(self.smooth(self.upsample(self.decoder(embedding))))
         
         loss = F.mse_loss(y, out)
-        
+        self.log('val_loss', loss)
         return {'val_loss': loss, "input": x, "gt":y, "output": out}
     
     def validation_epoch_end(self, outputs):
         x = outputs[0]
         grid = torchvision.utils.make_grid(x["output"]) 
         avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
-        self.logger.experiment.log_image(toPIL(grid), step =self.global_step) 
+        self.logger.experiment.log_image(toPIL(grid), name="reconstructions" , step =self.global_step) 
         return {'avg_loss': avg_loss}
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
+        #lr_scheduler = {'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5),
+        #                'name': 'learning_rate',
+        #                "monitor": "train_loss",
+        #                "name": "logger"
+        #               }
+        #return [optimizer], [lr_scheduler]

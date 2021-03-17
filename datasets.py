@@ -57,9 +57,29 @@ class SpecShadOcc(Dataset):
         xs = torch.stack(xs)
         return xs, y
     
+    def getNitems(self, index, n):
+        batch = self.images[index]
+        y = batch[0]
+        xs = sample(batch[1:],n)
+        xs = torch.stack(xs)
+        return xs, y
+    
     def __len__(self):
         return len(self.images)
     
     def show(self, idx):
         toPIL = transforms.ToPILImage()
         return [toPIL(x) for x in self.images[idx]]
+    
+class SpecShadOccN(Dataset):
+    def __init__(self, dataset, seq_length = 5):
+        self.dataset = dataset
+        self.seq_length = seq_length
+        
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, index):
+        return self.dataset.getNitems(index, self.seq_length)
+
+
