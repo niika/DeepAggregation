@@ -66,13 +66,13 @@ class MeanAgg(nn.Module):
 class AttentionAggregation(nn.Module):
     """ This Block uses Multi-head attention to aggregate a series of 2D feautures"""
     
-    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=3):
+    def __init__(self, embed_dim = 64, num_heads=4, dim_feedforward=64, num_layers=3, mode= "softmax"):
         super(AttentionAggregation, self).__init__()
         #self.attention = nn.MultiheadAttention(embed_dim, num_heads)
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=dim_feedforward)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.softmax = nn.Softmax(1)
-        
+        self.mode=mode
 
 
     def forward(self, xs):
@@ -92,15 +92,22 @@ class AttentionAggregation(nn.Module):
         y = self.transformer_encoder(y)       # -> (S, B x H x W, C)
         y = y.view(S, B, H, W, C)             # -> (S, B, H, W, C)
         y = y.permute(1,0,4,2,3)              # -> (B, S, C, H, W)
-        y = self.softmax(y)                   # -> (B, S, C, H, W) normalized along (S)equence dimension
-        y = (y*xs).sum(1)                     # -> (B, C, H, W)
         
+        if self.mode == "softmax":
+            y = self.softmax(y)                   # -> (B, S, C, H, W) normalized along (S)equence dimension
+            y = (y*xs).sum(1)                     # -> (B, C, H, W)
+        if self.mode == "sum":
+            y = y.sum(1)    
+        if self.mode =="mean":
+            y = y.mean(1)    
         return y
 
     
 class DeepAggNet(pl.LightningModule):
     """ Deep Set Residual Neural Network """
-    def __init__(self, encoder_num_blocks=10, decoder_num_blocks=10, smooth_num_blocks=6, planes=32, agg_block="Mean", num_heads=4, dim_feedforward=64, num_layers=3):
+    def __init__(self, encoder_num_blocks=10, decoder_num_blocks=10, smooth_num_blocks=6, 
+                 planes=32, downsampling_factor=2,
+                 agg_block="Mean", num_heads=4, dim_feedforward=64, num_layers=3, mode ="mean"):
         """
         encoder_num_blocks: Number of residual blocks used for encoding the images into an embedding
         decoder_num_blocks: Number of residual blocks used for decoding the embeddings into an image
@@ -123,7 +130,7 @@ class DeepAggNet(pl.LightningModule):
         self.downsample = []
         self.upsample = []
         n = planes
-        for i in range(2):
+        for i in range(downsampling_factor):
             # create downsampling layers using convolutions with strides
             self.downsample.append( nn.Conv2d(in_channels = n, out_channels=n*2, kernel_size=3, stride=2, padding=1 ) )
             self.downsample.append(nn.ReLU(inplace=True))
@@ -145,7 +152,7 @@ class DeepAggNet(pl.LightningModule):
         
         # Define Aggregation-Block
         if agg_block == "Attention":
-            self.agg = AttentionAggregation(embed_dim=n, num_heads=num_heads, dim_feedforward=dim_feedforward, num_layers=num_layers )
+            self.agg = AttentionAggregation(embed_dim=n, num_heads=num_heads, dim_feedforward=dim_feedforward, num_layers=num_layers, mode = mode )
         else:
             self.agg = MeanAgg()
         
@@ -156,14 +163,16 @@ class DeepAggNet(pl.LightningModule):
         
         #### LOGGING #####
         self.hyperparams = {
-            "encoder_num_blocks":encoder_num_blocks, 
-            "decoder_num_blocks":decoder_num_blocks, 
-            "smooth_num_blocks":smooth_num_blocks, 
-            "planes":planes, 
-            "embed_dim":n,
-            "num_heads":num_heads, 
-            "dim_feedforward":dim_feedforward, 
-            "num_layers":num_layers 
+            "encoder_num_blocks": encoder_num_blocks, 
+            "decoder_num_blocks": decoder_num_blocks, 
+            "smooth_num_blocks": smooth_num_blocks, 
+            "planes": planes, 
+            "embed_dim": n,
+            "num_heads": num_heads, 
+            "dim_feedforward": dim_feedforward, 
+            "num_layers": num_layers,
+            "downsampling_factor": downsampling_factor,
+            "mode":mode
         }
         self.save_hyperparameters(self.hyperparams)
 
@@ -233,8 +242,17 @@ class DeepAggNet(pl.LightningModule):
         
         batch : tuple of tensors of size (B, S, C, H, W)
         """
-        loss = self.training_step(batch, batch_idx)
-        return {'test_loss': loss['loss']}
+        # Forward pass
+        x, y = batch
+        xs = torch.split(x,1,dim = 1)
+        xs = [torch.squeeze(x,dim=1) for x in xs]
+        embedding = [self.encoder(self.downsample(self.input(x))) for x in xs]
+        embedding = torch.stack(embedding,1)
+        embedding = self.agg(embedding)
+        out = self.output(self.smooth(self.upsample(self.decoder(embedding))))
+        loss = F.mse_loss(y, out)
+        
+        return {'test_loss': loss}
     
     def validation_step(self, batch, batch_idx):
         """Forward pass of our DeepSet Network 
