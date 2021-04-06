@@ -107,7 +107,7 @@ class DeepAggNet(pl.LightningModule):
     """ Deep Set Residual Neural Network """
     def __init__(self, encoder_num_blocks=10, decoder_num_blocks=10, smooth_num_blocks=6, 
                  planes=32, downsampling_factor=2,
-                 agg_block="Mean", num_heads=4, dim_feedforward=64, num_layers=3, mode ="mean"):
+                 agg_block=None, num_heads=None, dim_feedforward=None, num_layers=None, mode =None):
         """
         encoder_num_blocks: Number of residual blocks used for encoding the images into an embedding
         decoder_num_blocks: Number of residual blocks used for decoding the embeddings into an image
@@ -278,7 +278,10 @@ class DeepAggNet(pl.LightningModule):
         x = outputs[0]
         grid = torchvision.utils.make_grid(x["output"]) 
         avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
-        self.logger.experiment.log_image(toPIL(grid), name="reconstructions" , step =self.global_step) 
+        try:
+            self.logger.experiment.log_image(toPIL(grid), name="reconstructions" , step =self.global_step) 
+        except: 
+            pass
         return {'avg_loss': avg_loss}
     
     def configure_optimizers(self):
