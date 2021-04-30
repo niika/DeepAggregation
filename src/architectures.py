@@ -96,6 +96,11 @@ class AttentionAggregation(nn.Module):
         if self.mode == "softmax":
             y = self.softmax(y)                   # -> (B, S, C, H, W) normalized along (S)equence dimension
             y = (y*xs).sum(1)                     # -> (B, C, H, W)
+            
+        if self.mode == "softmax2":
+            y = self.softmax(y)                   # -> (B, S, C, H, W) normalized along (S)equence dimension
+            y = y.sum(1)                     # -> (B, C, H, W)
+            
         if self.mode == "sum":
             y = y.sum(1)    
         if self.mode =="mean":
